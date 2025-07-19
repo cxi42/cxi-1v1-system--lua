@@ -1,0 +1,376 @@
+local Players = game:GetService("Players")
+local SoundService = game:GetService("SoundService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local WinnerAnnounce = ReplicatedStorage:WaitForChild("WinnerAnnounce")
+local RoundWinAnnounce = ReplicatedStorage:WaitForChild("RoundWinAnnounce")
+local PushTool = ReplicatedStorage:WaitForChild("PushTool")
+
+local Stage = script.Parent
+local Button = Stage.Button
+local Config = Stage.Config
+local MainBoard = Stage.MainBoard.SurfaceGui.Frame.Status
+local plate1 = Stage.Plate1
+local plate2 = Stage.Plate2
+local Announcement = Stage:FindFirstChild("Announcement")
+local CountdownLabel = Announcement and Announcement:FindFirstChild("Countdown")
+local Holder = Stage:WaitForChild("Holder")
+local TeleportPoint = Stage.T1.Position
+
+local inMatch = false
+local scores = {}
+local maxRounds = 3
+local currentRound = 0
+local countdownTask
+
+local platePlayers = {
+	[plate1] = nil,
+	[plate2] = nil
+}
+
+-- Updates the  scoreboard with current round score or waiting status
+local function updateMainBoard()
+	if not inMatch then
+		MainBoard.Text = "Waiting..."
+	else
+		MainBoard.Text = scores[platePlayers[plate1].UserId] .. " - " .. scores[platePlayers[plate2].UserId]
+	end
+end
+
+-- Updates each plate's mini board with the player name and icon
+local function updateBoardForPlate(plate, player)
+	local boardName = plate == plate1 and "Board1" or "Board2"
+	local sg = plate:FindFirstChild(boardName)
+	if sg and sg:FindFirstChild("SurfaceGui") then
+		local frame = sg.SurfaceGui.Frame
+		if player then
+			frame.PlayerName.Text = player.Name
+			frame.PlayerIcon.Image = "https://www.roblox.com/headshot-thumbnail/image?userId=" .. player.UserId .. "&width=420&height=420&format=png"
+		else
+			frame.PlayerName.Text = ""
+			frame.PlayerIcon.Image = ""
+		end
+	end
+end
+
+-- Freezes or unfreezes a player's movement
+local function freezePlayer(player, freeze)
+	local char = player.Character
+	if char then
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.WalkSpeed = freeze and 16 or 16 -- Originaly had the idea to freeze the player and built my script around the freezePlayer but changed it last minute but because most of my code relies on it I just set it to 16, 50 for ease of use
+			hum.JumpPower = freeze and 50 or 50
+		end
+	end
+end
+
+-- Plays  sound on the player 3 times before the round begins
+local function playFreezeSound(player)
+	local sound = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://6467449877"
+	sound.Volume = 1
+	sound.Parent = player.Character and player.Character:FindFirstChild("HumanoidRootPart") or SoundService
+	for _ = 1, 3 do
+		sound:Play()
+		task.wait(1)
+	end
+	sound:Destroy()
+end
+
+-- Plays the sound once the round begins
+local function playAfterFreezeSound(player)
+	local sound = Instance.new("Sound")
+	sound.SoundId = "rbxassetid://3199238628"
+	sound.Volume = 1
+	sound.Parent = player.Character and player.Character:FindFirstChild("HumanoidRootPart") or SoundService
+	sound:Play()
+	game.Debris:AddItem(sound, 3)
+end
+
+-- Makes holder parts visible/invisible
+local function setHolderVisibility(visible)
+	for _, part in ipairs(Holder:GetChildren()) do
+		if part:IsA("BasePart") then
+			part.Transparency = visible and 0.5 or 1
+			part.CanCollide = visible
+		end
+	end
+end
+
+-- Randomly picks which Ender will appear for the round
+local function pickRandomEnder()
+	local enderModels = {}
+	for _, child in ipairs(Button:GetChildren()) do
+		if child.Name == "Ender" then
+			table.insert(enderModels, child)
+		end
+	end
+	local chosenEnder = enderModels[math.random(1, #enderModels)]
+	-- Hide all enders first
+	for _, ender in ipairs(enderModels) do
+		for _, desc in ipairs(ender:GetDescendants()) do
+			if desc:IsA("BasePart") then
+				desc.Transparency = 1
+				desc.CanCollide = false
+			end
+		end
+	end
+	-- Show the chosen ender
+	for _, desc in ipairs(chosenEnder:GetDescendants()) do
+		if desc:IsA("BasePart") then
+			desc.Transparency = 0
+			desc.CanCollide = true
+		end
+	end
+	return chosenEnder
+end
+
+-- Gives push tool to player if they don't already have it
+local function givePushTool(player)
+	if player and player:FindFirstChild("Backpack") then
+		if not player.Backpack:FindFirstChild("PushTool") and not (player.Character and player.Character:FindFirstChild("PushTool")) then
+			local toolClone = PushTool:Clone()
+			toolClone.Parent = player.Backpack
+		end
+	end
+end
+
+-- Removes push tool from player if they have it
+local function removePushTool(player)
+	if player and player:FindFirstChild("Backpack") then
+		local tool = player.Backpack:FindFirstChild("PushTool")
+		if tool then
+			tool:Destroy()
+		end
+	end
+	if player and player.Character then
+		local tool = player.Character:FindFirstChild("PushTool")
+		if tool then
+			tool:Destroy()
+		end
+	end
+end
+
+-- Shows countdown on screen
+local function showCountdownAndFreeze()
+	if not CountdownLabel then return end
+	for _, player in pairs(platePlayers) do
+		freezePlayer(player, true)
+	end
+	CountdownLabel.Visible = true
+	for i = 3, 1, -1 do
+		CountdownLabel.Text = tostring(i)
+		task.wait(1)
+	end
+	CountdownLabel.Visible = false
+	for _, player in pairs(platePlayers) do
+		task.spawn(function()
+			playFreezeSound(player)
+			playAfterFreezeSound(player)
+		end)
+	end
+	task.wait(3)
+	for _, player in pairs(platePlayers) do
+		freezePlayer(player, false)
+	end
+end
+
+-- Starts the match and teleports players onto the stage
+local function startMatch()
+	inMatch = true
+	currentRound = 0
+	scores = {
+		[platePlayers[plate1].UserId] = 0,
+		[platePlayers[plate2].UserId] = 0
+	}
+	updateMainBoard()
+	updateBoardForPlate(plate1, platePlayers[plate1])
+	updateBoardForPlate(plate2, platePlayers[plate2])
+	setHolderVisibility(true)
+	task.delay(3, function()
+		setHolderVisibility(false)
+	end)
+	pickRandomEnder()
+	for _, player in pairs(platePlayers) do
+		local char = player.Character
+		if char and char:FindFirstChild("HumanoidRootPart") then
+			char:PivotTo(CFrame.new(TeleportPoint + Vector3.new(math.random(-3, 3), 5, math.random(-3, 3))))
+			freezePlayer(player, true)
+			givePushTool(player)
+		end
+	end
+	for _, player in pairs(platePlayers) do
+		task.spawn(function()
+			playFreezeSound(player)
+			playAfterFreezeSound(player)
+		end)
+	end
+	task.wait(3)
+	for _, player in pairs(platePlayers) do
+		freezePlayer(player, false)
+	end
+end
+
+-- Resets the stage between rounds
+local function resetMatch()
+	setHolderVisibility(true)
+	task.delay(3, function()
+		setHolderVisibility(false)
+	end)
+	pickRandomEnder()
+	for _, player in pairs(platePlayers) do
+		local char = player.Character
+		if char and char:FindFirstChild("HumanoidRootPart") then
+			char:PivotTo(CFrame.new(TeleportPoint + Vector3.new(math.random(-3, 3), 5, math.random(-3, 3))))
+			freezePlayer(player, true)
+			givePushTool(player)
+		end
+	end
+	for _, player in pairs(platePlayers) do
+		task.spawn(function()
+			playFreezeSound(player)
+			playAfterFreezeSound(player)
+		end)
+	end
+	task.wait(3)
+	for _, player in pairs(platePlayers) do
+		freezePlayer(player, false)
+	end
+end
+
+-- Cancels the countdown if players leave
+local function cancelCountdown()
+	if countdownTask then
+		task.cancel(countdownTask)
+		countdownTask = nil
+	end
+end
+
+-- Countdown before match starts if both players are on plates
+local function countdownAndStart()
+	countdownTask = task.spawn(function()
+		for i = 5, 1, -1 do
+			if not (platePlayers[plate1] and platePlayers[plate2] and platePlayers[plate1] ~= platePlayers[plate2]) then
+				cancelCountdown()
+				updateMainBoard()
+				return
+			end
+			MainBoard.Text = "Starting in " .. i
+			MainBoard.TextColor3 = i <= 3 and Color3.new(1, 0, 0) or Color3.new(1, 1, 1)
+			task.wait(1)
+		end
+		MainBoard.TextColor3 = Color3.new(1, 1, 1)
+		if platePlayers[plate1] and platePlayers[plate2] and platePlayers[plate1] ~= platePlayers[plate2] then
+			showCountdownAndFreeze()
+			startMatch()
+		else
+			cancelCountdown()
+			updateMainBoard()
+		end
+		countdownTask = nil
+	end)
+end
+
+-- Handles player clicking the Ender for scoring
+for _, child in ipairs(Button:GetChildren()) do
+	if child.Name == "Ender" then
+		local partEnd = child:WaitForChild("PartEnd", 5)
+		if partEnd and partEnd:IsA("BasePart") then
+			local cd = partEnd:FindFirstChildOfClass("ClickDetector")
+			if cd then
+				cd.MouseClick:Connect(function(player)
+					if not inMatch then return end
+					if not scores[player.UserId] then return end
+					scores[player.UserId] += 1
+					currentRound += 1
+					updateMainBoard()
+					if scores[player.UserId] >= maxRounds then
+						-- Player wins the match
+						MainBoard.Text = player.Name .. " won!"
+						inMatch = false
+						local loser = platePlayers[plate1] == player and platePlayers[plate2] or platePlayers[plate1]
+						local winnerScore = scores[player.UserId]
+						local loserScore = scores[loser.UserId]
+						WinnerAnnounce:FireAllClients(player.Name, loser.Name, winnerScore, loserScore)
+						if player:FindFirstChild("leaderstats") and player.leaderstats:FindFirstChild("Wins") then
+							player.leaderstats.Wins.Value += 1
+						end
+						-- Reset players
+						for _, p in pairs(platePlayers) do
+							local char = p.Character
+							if char and char:FindFirstChild("HumanoidRootPart") then
+								local spawn = workspace:FindFirstChild("SpawnLocation")
+								if spawn then
+									char:PivotTo(spawn.CFrame + Vector3.new(0, 5, 0))
+								end
+							end
+							freezePlayer(p, false)
+							removePushTool(p)
+						end
+						platePlayers[plate1] = nil
+						platePlayers[plate2] = nil
+						updateBoardForPlate(plate1, nil)
+						updateBoardForPlate(plate2, nil)
+						updateMainBoard()
+					else
+						-- Continue to next round
+						for _, p in pairs(platePlayers) do
+							RoundWinAnnounce:FireClient(p, player.Name, currentRound)
+						end
+						resetMatch()
+					end
+				end)
+			end
+		end
+	end
+end
+
+-- Handles player stepping on plate
+local function onPlayerEnterZone(plate, player)
+	if inMatch then return end
+	if platePlayers[plate] then return end
+	platePlayers[plate] = player
+	updateBoardForPlate(plate, player)
+	if platePlayers[plate1] and platePlayers[plate2] and platePlayers[plate1] ~= platePlayers[plate2] then
+		countdownAndStart()
+	end
+end
+
+-- Handles player leaving plate
+local function onPlayerLeaveZone(plate, player)
+	if inMatch then return end
+	if platePlayers[plate] == player then
+		platePlayers[plate] = nil
+		updateBoardForPlate(plate, nil)
+		cancelCountdown()
+		updateMainBoard()
+	end
+end
+
+-- Sets up plate detection zones for stepping on/off plates
+local function setupZoneDetection(plate, zoneName)
+	local zonePart = plate:WaitForChild(zoneName)
+	local touching = {}
+	zonePart.Touched:Connect(function(hit)
+		local player = Players:GetPlayerFromCharacter(hit.Parent)
+		if player and not touching[player] then
+			touching[player] = true
+			onPlayerEnterZone(plate, player)
+		end
+	end)
+	zonePart.TouchEnded:Connect(function(hit)
+		local player = Players:GetPlayerFromCharacter(hit.Parent)
+		if player and touching[player] then
+			touching[player] = nil
+			onPlayerLeaveZone(plate, player)
+		end
+	end)
+end
+
+-- Set up both plates
+setupZoneDetection(plate1, "Zone1")
+setupZoneDetection(plate2, "Zone2")
+updateMainBoard()
+updateBoardForPlate(plate1, nil)
+updateBoardForPlate(plate2, nil)
+setHolderVisibility(false)
